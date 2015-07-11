@@ -1,27 +1,27 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Lib
     ( runFuse
     ) where
 
-import Control.Exception.Base (SomeException)
-import Foreign.C.Error
-import Data.Monoid ((<>))
-import Control.Concurrent.MVar
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as B
-import qualified Data.HashMap.Strict as M
-import System.Posix.Types
-import System.Posix.Files
-import System.Fuse
+import           Control.Concurrent.MVar
+import           Control.Exception.Base  (SomeException)
+import           Data.ByteString         (ByteString)
+import qualified Data.ByteString.Char8   as B
+import qualified Data.HashMap.Strict     as M
+import           Data.Monoid             ((<>))
+import           Foreign.C.Error
+import           System.Fuse
+import           System.Posix.Files
+import           System.Posix.Types
 
 data DUMMY = DUMMY
 debugFile = "/home/cgag/src/fuse/haskell/debug"
 dbg msg = B.appendFile debugFile (msg <> "\n")
 
 data File = File
-  { stat :: !FileStat
+  { stat     :: !FileStat
   , contents :: !ByteString
   }
 
@@ -55,11 +55,13 @@ type FileStore = MVar (M.HashMap FilePath File)
 helloReadDirectory :: FileStore
                    -> FilePath -> IO (Either Errno [(FilePath, FileStat)])
 helloReadDirectory fileStore fpath =
-  case fpath of
-    "/" -> do
-      fileMap <- readMVar fileStore
-      return (Right $ M.foldlWithKey' (\acc k v -> (k, stat v):acc) [] fileMap)
-    _ -> return (Left eNOENT)
+    case fpath of
+        "/" -> do
+            fileMap <- readMVar fileStore
+            return (Right (fileList fileMap))
+        _ -> return (Left eNOENT)
+  where
+    fileList fileMap = M.foldlWithKey' (\acc k v -> (k, stat v):acc) [] fileMap
 
 helloCreateDevice :: FileStore
                   -> FilePath
@@ -68,20 +70,21 @@ helloCreateDevice :: FileStore
                   -> DeviceID
                   -> IO Errno
 helloCreateDevice fileStore fpath entryType mode did = do
-  dbg ("creating deviced with path: " <> B.pack fpath)
-  ctx <- getFuseContext
-  case entryType of
-    RegularFile -> do
-      let (_:fname) = fpath
-      let newStat = (fileStat ctx){ statFileMode = mode }
-      _ <- modifyMVar_ fileStore (return . M.insert fname (File newStat ""))
-      return eOK
-    _ -> return eNOENT
+    dbg ("creating deviced with path: " <> B.pack fpath)
+    ctx <- getFuseContext
+    fileMap <- readMVar fileStore
+    case entryType of
+        RegularFile -> do
+            let (_:fname) = fpath
+            let newStat = (fileStat ctx){ statFileMode = mode }
+            _ <- swapMVar fileStore (M.insert fname (File newStat "") fileMap)
+            return eOK
+        _ -> return eNOENT
 
 
 helloOpenDirectory :: FilePath -> IO Errno
 helloOpenDirectory "/" = return eOK
-helloOpenDirectory _  = return eNOENT
+helloOpenDirectory _   = return eNOENT
 
 helloGetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
 helloGetFileSystemStats str =
@@ -113,24 +116,24 @@ helloWrite :: FileStore
            -> FileOffset
            -> IO (Either Errno ByteCount)
 helloWrite fileStore fpath dummy bytes offset = do
-  fileMap <- readMVar fileStore
-  let (_:fname) = fpath
-  case M.lookup fname fileMap of
-    Nothing -> do
-      dbg $ "Write: didn't find file (" <> B.pack fname <> ")"
-      return (Left eNOENT)
-    Just (File stat contents) -> do
-      dbg ("Writing to " <> B.pack fname)
-      let newContents = B.take (ioffset - 1) contents <> bytes
-      swapMVar fileStore
-               (M.insert fname
-                         (File
-                            (stat {
-                              statFileSize = fromIntegral . B.length $ newContents
-                            })
-                            newContents)
-                        fileMap)
-      return $ Right (fromIntegral . B.length $ bytes)
+    fileMap <- readMVar fileStore
+    let (_:fname) = fpath
+    case M.lookup fname fileMap of
+        Nothing -> do
+          dbg $ "Write: didn't find file (" <> B.pack fname <> ")"
+          return (Left eNOENT)
+        Just (File stat contents) -> do
+          dbg ("Writing to " <> B.pack fname)
+          let newContents = B.take (ioffset - 1) contents <> bytes
+          swapMVar fileStore
+                   (M.insert fname
+                             (File
+                                (stat {
+                                    statFileSize = fromIntegral . B.length $ newContents
+                                })
+                                newContents)
+                            fileMap)
+          return $ Right (fromIntegral . B.length $ bytes)
   where
     ioffset = fromIntegral offset
     bytesWritten = fromIntegral (B.length bytes)
