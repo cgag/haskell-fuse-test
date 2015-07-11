@@ -30,8 +30,7 @@ helloOpen :: FilePath
           -> OpenMode
           -> OpenFileFlags
           -> IO (Either Errno DUMMY)
-helloOpen fpath mode flags = do
-    return (Right DUMMY)
+helloOpen fpath mode flags = return (Right DUMMY)
 
 helloRead :: FileStore
           -> FilePath
@@ -40,22 +39,22 @@ helloRead :: FileStore
           -> FileOffset
           -> IO (Either Errno ByteString)
 helloRead fileStore fpath handle bc offset = do
-  fileMap <- readMVar fileStore
-  let (_:fname) = fpath
-  dbg ("Reading " <> B.pack fname)
-  case M.lookup fname fileMap of
-    Just (File _ contents) -> do
-      dbg ("Read " <> B.pack fname <> ", got: " <> contents)
-      return (Right contents)
-    Nothing -> do
-      dbg ("Failed to read: " <> B.pack fname)
-      return (Left eNOENT)
+    fileMap <- readMVar fileStore
+    let (_:fname) = fpath
+    dbg ("Reading " <> B.pack fname)
+    case M.lookup fname fileMap of
+        Just (File _ contents) -> do
+            dbg ("Read " <> B.pack fname <> ", got: " <> contents)
+            return (Right contents)
+        Nothing -> do
+            dbg ("Failed to read: " <> B.pack fname)
+            return (Left eNOENT)
 
 type FileStore = MVar (M.HashMap FilePath File)
 
 helloReadDirectory :: FileStore
-                   -> (FilePath -> IO (Either Errno [(FilePath, FileStat)]))
-helloReadDirectory fileStore fpath = do
+                   -> FilePath -> IO (Either Errno [(FilePath, FileStat)])
+helloReadDirectory fileStore fpath =
   case fpath of
     "/" -> do
       fileMap <- readMVar fileStore
@@ -75,59 +74,18 @@ helloCreateDevice fileStore fpath entryType mode did = do
     RegularFile -> do
       let (_:fname) = fpath
       let newStat = (fileStat ctx){ statFileMode = mode }
-      _ <- modifyMVar_ fileStore (\m -> return $ M.insert fname (File newStat "") m)
-      -- (\m -> return $ files <> [(fname, (fileStat ctx) { statFileMode = mode } )])
+      _ <- modifyMVar_ fileStore (return . M.insert fname (File newStat ""))
       return eOK
     _ -> return eNOENT
 
--- TODO: understand and anki all these olptions
-dirStat ctx = FileStat { statEntryType = Directory
-                       , statFileMode = foldr1 unionFileModes
-                                          [ ownerReadMode
-                                          , ownerExecuteMode
-                                          , ownerWriteMode
-                                          , groupReadMode
-                                          , groupWriteMode
-                                          , groupExecuteMode
-                                          , otherReadMode
-                                          , otherWriteMode
-                                          , otherExecuteMode
-                                          ]
-                       , statLinkCount = 2
-                       , statFileOwner = fuseCtxUserID ctx
-                       , statFileGroup = fuseCtxGroupID ctx
-                       , statSpecialDeviceID = 0
-                       , statFileSize = 4096
-                       , statBlocks = 1
-                       , statAccessTime = 0
-                       , statModificationTime = 0
-                       , statStatusChangeTime = 0
-                       }
-
-fileStat ctx = FileStat { statEntryType = RegularFile
-                        , statFileMode = foldr1 unionFileModes
-                                           [ ownerReadMode
-                                           , ownerWriteMode
-                                           , groupReadMode
-                                           , otherReadMode
-                                           ]
-                        , statLinkCount = 1
-                        , statFileOwner = fuseCtxUserID ctx
-                        , statFileGroup = fuseCtxGroupID ctx
-                        , statSpecialDeviceID = 0
-                        , statFileSize = 0
-                        , statBlocks = 1
-                        , statAccessTime = 0
-                        , statModificationTime = 0
-                        , statStatusChangeTime = 0
-                        }
 
 helloOpenDirectory :: FilePath -> IO Errno
 helloOpenDirectory "/" = return eOK
 helloOpenDirectory _  = return eNOENT
 
-helloGetFileSystemStats str = do
-    return $ Right $ FileSystemStats
+helloGetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
+helloGetFileSystemStats str =
+    return $ Right FileSystemStats
         { fsStatBlockSize = 512
         , fsStatBlockCount = 1
         , fsStatBlocksFree = 1
@@ -164,17 +122,74 @@ helloWrite fileStore fpath dummy bytes offset = do
     Just (File stat contents) -> do
       dbg ("Writing to " <> B.pack fname)
       let newContents = B.take (ioffset - 1) contents <> bytes
-      swapMVar fileStore (M.insert fname (File (stat {statFileSize = (fromIntegral . B.length $ newContents)})newContents) fileMap)
+      swapMVar fileStore
+               (M.insert fname
+                         (File
+                            (stat {
+                              statFileSize = fromIntegral . B.length $ newContents
+                            })
+                            newContents)
+                        fileMap)
       return $ Right (fromIntegral . B.length $ bytes)
   where
     ioffset = fromIntegral offset
-    bytesWritten = (fromIntegral . B.length $ bytes)
+    bytesWritten = fromIntegral (B.length bytes)
 
 helloSetFileTimes :: FileStore -> FilePath -> EpochTime -> EpochTime -> IO Errno
 helloSetFileTimes fileStore fpath t1 t2 = return eOK
 
 helloAccess :: FilePath -> Int -> IO Errno
 helloAccess _ _ = return eOK
+
+helloRemoveLink :: FileStore -> FilePath -> IO Errno
+helloRemoveLink fileStore fpath = do
+    fileMap <- readMVar fileStore
+    let (_:fname) = fpath
+    case M.lookup fname fileMap of
+        Nothing -> return eNOENT
+        Just _ -> do
+            swapMVar fileStore (M.delete fname fileMap)
+            return eOK
+
+-- TODO: understand and anki all these olptions
+dirStat ctx = FileStat { statEntryType = Directory
+                       , statFileMode = foldr1 unionFileModes
+                                          [ ownerReadMode
+                                          , ownerExecuteMode
+                                          , ownerWriteMode
+                                          , groupReadMode
+                                          , groupExecuteMode
+                                          , otherReadMode
+                                          , otherExecuteMode
+                                          ]
+                       , statLinkCount = 2
+                       , statFileOwner = fuseCtxUserID ctx
+                       , statFileGroup = fuseCtxGroupID ctx
+                       , statSpecialDeviceID = 0
+                       , statFileSize = 4096
+                       , statBlocks = 1
+                       , statAccessTime = 0
+                       , statModificationTime = 0
+                       , statStatusChangeTime = 0
+                       }
+
+fileStat ctx = FileStat { statEntryType = RegularFile
+                        , statFileMode = foldr1 unionFileModes
+                                           [ ownerReadMode
+                                           , ownerWriteMode
+                                           , groupReadMode
+                                           , otherReadMode
+                                           ]
+                        , statLinkCount = 1
+                        , statFileOwner = fuseCtxUserID ctx
+                        , statFileGroup = fuseCtxGroupID ctx
+                        , statSpecialDeviceID = 0
+                        , statFileSize = 0
+                        , statBlocks = 1
+                        , statAccessTime = 0
+                        , statModificationTime = 0
+                        , statStatusChangeTime = 0
+                        }
 
 runFuse :: IO ()
 runFuse = do
@@ -200,7 +215,8 @@ runFuse = do
             , fuseGetFileStat        = helloGetFileStat fileStore
             , fuseCreateDevice       = helloCreateDevice fileStore
             , fuseWrite              = helloWrite fileStore
-            , fuseRelease = (\_ _ -> return ())
+            , fuseRelease            = \_ _ -> return ()
+            , fuseRemoveLink         = helloRemoveLink fileStore
 
             , fuseSetFileTimes       = helloSetFileTimes fileStore
             }
