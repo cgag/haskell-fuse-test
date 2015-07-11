@@ -20,10 +20,14 @@ data DUMMY = DUMMY
 debugFile = "/home/cgag/src/fuse/haskell/debug"
 dbg msg = B.appendFile debugFile (msg <> "\n")
 
-data File = File
-  { stat     :: !FileStat
-  , contents :: !ByteString
-  }
+
+data Contents = Dir  { d_contents :: M.HashMap FilePath Entry }
+              | File { f_contents :: !ByteString }
+
+data Entry = Entry
+    { stat :: FileStat
+    , contents :: Contents
+    }
 
 
 helloOpen :: FilePath
@@ -43,14 +47,17 @@ helloRead fileStore fpath handle bc offset = do
     let (_:fname) = fpath
     dbg ("Reading " <> B.pack fname)
     case M.lookup fname fileMap of
-        Just (File _ contents) -> do
+        Just (Entry _ (File contents)) -> do
             dbg ("Read " <> B.pack fname <> ", got: " <> contents)
             return (Right contents)
+        Just (Entry _ (Dir contents)) -> do
+            dbg ("Read dir " <> B.pack fname)
+            return (Right "DIRCONTENTS")
         Nothing -> do
             dbg ("Failed to read: " <> B.pack fname)
             return (Left eNOENT)
 
-type FileStore = MVar (M.HashMap FilePath File)
+type FileStore = MVar (M.HashMap FilePath Entry)
 
 helloReadDirectory :: FileStore
                    -> FilePath -> IO (Either Errno [(FilePath, FileStat)])
@@ -61,7 +68,7 @@ helloReadDirectory fileStore fpath =
             return (Right (fileList fileMap))
         _ -> return (Left eNOENT)
   where
-    fileList fileMap = M.foldlWithKey' (\acc k v -> (k, stat v):acc) [] fileMap
+    fileList = M.foldlWithKey' (\acc k v -> (k, stat v):acc) []
 
 helloCreateDevice :: FileStore
                   -> FilePath
@@ -70,16 +77,33 @@ helloCreateDevice :: FileStore
                   -> DeviceID
                   -> IO Errno
 helloCreateDevice fileStore fpath entryType mode did = do
-    dbg ("creating deviced with path: " <> B.pack fpath)
+    dbg ("creating device with path: " <> B.pack fpath)
     ctx <- getFuseContext
     fileMap <- readMVar fileStore
     case entryType of
         RegularFile -> do
             let (_:fname) = fpath
             let newStat = (fileStat ctx){ statFileMode = mode }
-            _ <- swapMVar fileStore (M.insert fname (File newStat "") fileMap)
+            _ <- swapMVar fileStore (M.insert fname (Entry newStat (File "")) fileMap)
             return eOK
         _ -> return eNOENT
+
+helloCreateDirectory :: FileStore -> FilePath -> FileMode -> IO Errno
+helloCreateDirectory fileStore fpath mode = do
+    dbg ("creating directory with path: " <> B.pack fpath)
+    ctx <- getFuseContext
+    fileMap <- readMVar fileStore
+    let (_:fname) = fpath
+    let newStat = (dirStat ctx) { statFileMode=mode }
+    swapMVar fileStore (M.insert fname
+                                 (Entry newStat
+                                        (Dir (M.fromList [(".",  Entry {stat=dirStat ctx, contents=(Dir M.empty)})
+                                                         ,("..", Entry {stat=dirStat ctx, contents=(Dir M.empty)})
+                                                         ])))
+                                 fileMap)
+    return eOK
+
+
 
 
 helloOpenDirectory :: FilePath -> IO Errno
@@ -107,7 +131,7 @@ helloGetFileStat fileStore fpath = do
     "/" -> return $ Right (dirStat ctx)
     (_:fname) -> case M.lookup fname fileMap of
                       Nothing   -> return (Left  eNOENT)
-                      Just (File stat _) -> return (Right stat)
+                      Just (Entry stat _) -> return (Right stat)
 
 helloWrite :: FileStore
            -> FilePath
@@ -122,19 +146,26 @@ helloWrite fileStore fpath dummy bytes offset = do
         Nothing -> do
           dbg $ "Write: didn't find file (" <> B.pack fname <> ")"
           return (Left eNOENT)
-        Just (File stat contents) -> do
-          dbg ("Writing to " <> B.pack fname)
-          let newContents = B.take (ioffset - 1) contents <> bytes
-          swapMVar fileStore
-                   (M.insert fname
-                             (File
-                                (stat {
-                                    statFileSize = fromIntegral . B.length $ newContents
-                                })
-                                newContents)
-                            fileMap)
-          return $ Right (fromIntegral . B.length $ bytes)
+        Just (Entry stat contents) -> do
+            case contents of
+                File fcontents -> do
+                    dbg ("Writing to " <> B.pack fname)
+                    writeFile fileMap stat fname fcontents
+                Dir dcontents -> do
+                    dbg "Writing to DIR, what"
+                    return (Right 10)
   where
+    writeFile fileMap stat fname contents = do
+        let newContents = B.take (ioffset - 1) contents <> bytes
+        swapMVar fileStore
+                 (M.insert fname
+                           (Entry
+                              (stat {
+                                  statFileSize = fromIntegral . B.length $ newContents
+                              })
+                              (File newContents))
+                          fileMap)
+        return $ Right (fromIntegral . B.length $ bytes)
     ioffset = fromIntegral offset
     bytesWritten = fromIntegral (B.length bytes)
 
@@ -153,6 +184,8 @@ helloRemoveLink fileStore fpath = do
         Just _ -> do
             swapMVar fileStore (M.delete fname fileMap)
             return eOK
+
+
 
 -- TODO: understand and anki all these olptions
 dirStat ctx = FileStat { statEntryType = Directory
@@ -198,8 +231,8 @@ runFuse :: IO ()
 runFuse = do
     ctx <- getFuseContext
 
-    fileList <- newMVar (M.fromList [(".",  File {stat=dirStat ctx, contents=""})
-                                    ,("..", File {stat=dirStat ctx, contents=""})
+    fileList <- newMVar (M.fromList [(".",  Entry {stat=dirStat ctx, contents=(Dir M.empty)})
+                                    ,("..", Entry {stat=dirStat ctx, contents=(Dir M.empty)})
                                     ])
 
     fuseMain (buildOps fileList) defaultExceptionHandler
@@ -220,6 +253,7 @@ runFuse = do
             , fuseWrite              = helloWrite fileStore
             , fuseRelease            = \_ _ -> return ()
             , fuseRemoveLink         = helloRemoveLink fileStore
+            , fuseCreateDirectory    = helloCreateDirectory fileStore
 
             , fuseSetFileTimes       = helloSetFileTimes fileStore
             }
