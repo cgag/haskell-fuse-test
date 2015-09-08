@@ -20,7 +20,8 @@ library
                     ,  bytestring
                     ,  HFuse
                     ,  unix
-                     , unordered-containers
+                    ,  unordered-containers
+                    ,  split
   default-language:    Haskell2010
 
 executable fuse-hello

@@ -15,6 +15,8 @@ import           Foreign.C.Error
 import           System.Fuse
 import           System.Posix.Files
 import           System.Posix.Types
+import Data.List (intercalate)
+import Data.List.Split (splitOn)
 
 data DUMMY = DUMMY
 debugFile = "/home/cgag/src/fuse/haskell/debug"
@@ -23,11 +25,12 @@ dbg msg = B.appendFile debugFile (msg <> "\n")
 
 data Contents = Dir  { d_contents :: M.HashMap FilePath Entry }
               | File { f_contents :: !ByteString }
+              deriving Show
 
-data Entry = Entry
+ata Entry = Entry
     { stat :: FileStat
     , contents :: Contents
-    }
+    } deriving Show
 
 
 helloOpen :: FilePath
@@ -82,11 +85,13 @@ helloCreateDevice fileStore fpath entryType mode did = do
     fileMap <- readMVar fileStore
     case entryType of
         RegularFile -> do
-            let (_:fname) = fpath
-            let newStat = (fileStat ctx){ statFileMode = mode }
+            let (fname:restOfPath) = filter (/= "") . splitOn "/" $ fpath
+            let newStat = (fileStat ctx) { statFileMode = mode }
             _ <- swapMVar fileStore (M.insert fname (Entry newStat (File "")) fileMap)
             return eOK
-        _ -> return eNOENT
+        _ -> do
+          dbg ("Failed to create unknown device type with path: " <> B.pack fpath)
+          return eNOENT
 
 helloCreateDirectory :: FileStore -> FilePath -> FileMode -> IO Errno
 helloCreateDirectory fileStore fpath mode = do
@@ -95,15 +100,16 @@ helloCreateDirectory fileStore fpath mode = do
     fileMap <- readMVar fileStore
     let (_:fname) = fpath
     let newStat = (dirStat ctx) { statFileMode=mode }
-    swapMVar fileStore (M.insert fname
-                                 (Entry newStat
-                                        (Dir (M.fromList [(".",  Entry {stat=dirStat ctx, contents=(Dir M.empty)})
-                                                         ,("..", Entry {stat=dirStat ctx, contents=(Dir M.empty)})
-                                                         ])))
-                                 fileMap)
+    swapMVar fileStore
+             (M.insert fname
+                 (Entry newStat
+                     (Dir (M.fromList [(".",  Entry { stat=dirStat ctx
+                                                    , contents=(Dir M.empty)})
+                                      ,("..", Entry { stat=dirStat ctx
+                                                    , contents=(Dir M.empty)})
+                                      ])))
+                 fileMap)
     return eOK
-
-
 
 
 helloOpenDirectory :: FilePath -> IO Errno
@@ -124,14 +130,25 @@ helloGetFileSystemStats str =
 
 helloGetFileStat :: FileStore -> FilePath -> IO (Either Errno FileStat)
 helloGetFileStat fileStore fpath = do
-  dbg ("getting file stat: " <> B.pack fpath)
-  ctx <- getFuseContext
-  fileMap <- readMVar fileStore
-  case fpath of
-    "/" -> return $ Right (dirStat ctx)
-    (_:fname) -> case M.lookup fname fileMap of
-                      Nothing   -> return (Left  eNOENT)
-                      Just (Entry stat _) -> return (Right stat)
+    dbg ("getting file stat: " <> B.pack fpath)
+    ctx <- getFuseContext
+    fileMap <- readMVar fileStore
+    case fpath of
+        "/" -> return $ Right (dirStat ctx)
+        _ -> do
+            let (fname:restOfPath) = filter (/= "") . splitOn "/" $ fpath
+            dbg ("looking up fname of: " <> B.pack fname)
+            case M.lookup fname fileMap of
+                Nothing -> do
+                    dbg ("Failed to find " <> B.pack fname)
+                    dbg ("Used map" <> B.pack (show fileMap))
+                    return (Left eNOENT)
+                Just (Entry stat (File _)) -> do
+                    dbg ("Found file")
+                    return (Right stat)
+                Just (Entry stat (Dir _)) -> do
+                    dbg "Found dir"
+                    error "need a function that recursively looks up stats"
 
 helloWrite :: FileStore
            -> FilePath
@@ -139,7 +156,8 @@ helloWrite :: FileStore
            -> ByteString
            -> FileOffset
            -> IO (Either Errno ByteCount)
-helloWrite fileStore fpath dummy bytes offset = do
+helloWrite fileStore fpath _ bytes offset = do
+    dbg ("writing file: " <> B.pack fpath)
     fileMap <- readMVar fileStore
     let (_:fname) = fpath
     case M.lookup fname fileMap of
@@ -149,11 +167,11 @@ helloWrite fileStore fpath dummy bytes offset = do
         Just (Entry stat contents) -> do
             case contents of
                 File fcontents -> do
-                    dbg ("Writing to " <> B.pack fname)
+                    dbg ("Writing to file: -- " <> B.pack fname)
                     writeFile fileMap stat fname fcontents
                 Dir dcontents -> do
                     dbg "Writing to DIR, what"
-                    return (Right 10)
+                    return (Left eNOENT)
   where
     writeFile fileMap stat fname contents = do
         let newContents = B.take (ioffset - 1) contents <> bytes
